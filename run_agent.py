@@ -5072,8 +5072,45 @@ class AIAgent:
 
         return existing
 
+    def _classify_task_intent(self, user_message: str) -> str:
+        text = user_message.strip().lower()
+
+        if "python環境" in text or "pythonの環境" in text or "pythonを診断" in text:
+            return "python"
+
+        if "最近のコミット" in text or "履歴" in text or "git log" in text:
+            return "history"
+
+        if "差分" in text or "変更を見て" in text or "git diff" in text:
+            return "diff"
+
+        if "このリポジトリを見て" in text or "ざっと見て" in text:
+            return "overview"
+
+        if "gitの状況" in text or "gitの状態" in text or "プロジェクトの状態" in text:
+            return "status"
+
+        return "generic"
+
+
     def _make_autonomous_plan(self, user_message: str) -> list[str] | None:
         text = user_message.strip().lower()
+        intent = self._classify_task_intent(user_message)
+
+        if intent == "python":
+            return ["which python3", "python3 --version", "pwd"]
+
+        if intent == "history":
+            return ["pwd", "ls", "git log --oneline -n 5"]
+
+        if intent == "diff":
+            return ["pwd", "ls", "git status", "git diff --stat"]
+
+        if intent == "overview":
+            return ["pwd", "ls", "git status", "git log --oneline -n 3"]
+
+        if intent == "status":
+            return ["pwd", "ls", "git status", "git diff --stat", "git log --oneline -n 3"]
 
         if "このプロジェクトの状態" in text or "プロジェクトの状態" in text:
             return ["pwd", "ls", "git status"]
@@ -5328,6 +5365,7 @@ class AIAgent:
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored
+
 
 #####
 
