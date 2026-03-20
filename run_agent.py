@@ -5043,28 +5043,91 @@ class AIAgent:
     def _make_autonomous_plan(self, user_message: str) -> list[str] | None:
         text = user_message.strip().lower()
 
-        if "プロジェクトの状態" in user_message:
+        if "このプロジェクトの状態" in text or "プロジェクトの状態" in text:
+            return ["pwd", "ls", "git status"]
+
+        if "プロジェクトを調べて" in text or "このプロジェクトを調べて" in text:
             return ["pwd", "ls", "git status", "git diff --stat"]
 
-        if "python環境" in user_message or "pythonの環境" in user_message:
+        if ("gitリポジトリ" in text or "git repository" in text) and "履歴" in text:
+            return ["pwd", "ls", "git status", "git log --oneline -n 5"]
+
+        if "最近のgitの状況" in text or "gitの状況" in text or "gitの状態を見て" in text:
+            return ["pwd", "ls", "git status", "git diff --stat", "git log --oneline -n 5"]
+
+        if "gitの状態をまとめて" in text or "git状態をまとめて" in text:
+            return ["pwd", "git status", "git diff --stat", "git log --oneline -n 3"]
+
+        if "最近のコミット" in text or "最新コミット" in text:
+            return ["pwd", "git log --oneline -n 5"]
+
+        if "差分を見て" in text or "変更を見て" in text:
+            return ["pwd", "git status", "git diff --stat"]
+
+        if "python環境" in text or "pythonの環境" in text:
             return ["which python3", "python3 --version", "pwd"]
 
-        if "gitリポジトリ" in user_message and "履歴" in user_message:
-            return ["git status", "git log --oneline -n 5"]
+        if "pythonを診断して" in text or "python環境を診断して" in text:
+            return ["which python3", "python3 --version", "pwd", "ls"]
 
-        if "最近のgitの状況" in user_message:
-            return ["git status", "git diff --stat", "git log --oneline -n 5"]
+        if "今の場所を確認して" in text or "作業場所を確認して" in text:
+            return ["pwd", "ls"]
+
+        if "このリポジトリをざっと見て" in text or "リポジトリをざっと見て" in text:
+            return ["pwd", "ls", "git status", "git log --oneline -n 3"]
 
         return None
 
+
     def _run_autonomous_plan(self, plan: list[str], task_id: str, messages: list[dict]) -> dict:
-        max_steps = 3
+        max_steps = 5
         outputs = []
 
+        working_cwd = self._command_cwd
+        last_ls_output = ""
+
+        summary = {
+            "cwd": working_cwd,
+            "git_repo": False,
+            "git_dirty": None,
+            "changed_files": 0,
+            "latest_commit": None,
+            "python_path": None,
+            "python_version": None,
+        }
+
         for cmd in plan[:max_steps]:
+            run_cmd = cmd
+
+            # Git系コマンドの前に、候補ディレクトリを自動探索して移動
+            if cmd.startswith("git "):
+                candidate_names = [
+                    "hermes-agent",
+                    "hn_ai",
+                    "everything-claude-code",
+                ]
+
+                if not os.path.isdir(os.path.join(working_cwd, ".git")):
+                    found_candidate = None
+
+                    # 直前の ls 結果から候補を探す
+                    for name in candidate_names:
+                        if name in last_ls_output:
+                            candidate_dir = os.path.join(working_cwd, name)
+                            if os.path.isdir(candidate_dir) and os.path.isdir(os.path.join(candidate_dir, ".git")):
+                                found_candidate = candidate_dir
+                                break
+
+                    # 候補が見つかったら移動
+                    if found_candidate:
+                        working_cwd = found_candidate
+                        outputs.append(f"🤖 自律判断: {working_cwd} に移動して続行します")
+                        summary["cwd"] = working_cwd
+
+
             function_result = handle_function_call(
                 "terminal",
-                {"command": f"cd {shlex.quote(self._command_cwd)} && {cmd}"},
+                {"command": f"cd {shlex.quote(working_cwd)} && {run_cmd}"},
                 task_id,
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                 honcho_manager=self._honcho,
@@ -5075,27 +5138,95 @@ class AIAgent:
             raw_output = parsed.get("output", "") if isinstance(parsed, dict) else ""
             output = raw_output.strip()
 
-            # Gitリポジトリ外なら、その時点で停止
+            # ls の結果は次の判断に使う
+            if run_cmd == "ls":
+                last_ls_output = output
+
+            # pwd の結果は要約に使う
+            if run_cmd == "pwd" and output:
+                working_cwd = output
+                summary["cwd"] = output
+
+            # Git repo 判定
             if "not a git repository" in output or "Not a git repository" in output:
                 outputs.append(
-                    f"[cwd: {self._command_cwd}]\n⚠️ ここは Git リポジトリではありません\n💡 例: cd hermes-agent を実行してから試してください"
+                    f"[cwd: {working_cwd}]\n⚠️ ここは Git リポジトリではありません\n💡 例: cd hermes-agent を実行してから試してください"
                 )
-                break
+                continue
 
-            # 出力があるものだけ保存
+            if (
+                run_cmd.startswith("git status")
+                or run_cmd.startswith("git log")
+                or run_cmd.startswith("git diff")
+                or run_cmd.startswith("git branch")
+            ):
+                summary["git_repo"] = True
+
+            if run_cmd.startswith("git status"):
+                changed_files = 0
+                for line in output.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("modified:") or stripped.startswith("new file:") or stripped.startswith("deleted:"):
+                        changed_files += 1
+
+                if "Changes not staged for commit" in output or "Untracked files:" in output:
+                    summary["git_dirty"] = True
+                elif "nothing to commit, working tree clean" in output:
+                    summary["git_dirty"] = False
+
+                summary["changed_files"] = changed_files
+
+            if run_cmd.startswith("git log"):
+                first_line = output.splitlines()[0].strip() if output.splitlines() else None
+                summary["latest_commit"] = first_line
+
+            if run_cmd.startswith("which python3") and output:
+                summary["python_path"] = output.splitlines()[0].strip()
+
+            if run_cmd.startswith("python3 --version") and output:
+                summary["python_version"] = output.splitlines()[0].strip()
+
             if output:
-                if cmd != "pwd":
-                    outputs.append(f"[cwd: {self._command_cwd}]\n$ {cmd}\n{output}")
+                if run_cmd != "pwd":
+                    outputs.append(f"[cwd: {working_cwd}]\n$ {run_cmd}\n{output}")
                 else:
-                    outputs.append(f"$ {cmd}\n{output}")
+                    outputs.append(f"$ {run_cmd}\n{output}")
+
+        # 最後に要約
+        summary_lines = [
+            "要約:",
+            f"- 現在地: {summary['cwd']}",
+            f"- Git リポジトリ: {'はい' if summary['git_repo'] else 'いいえ'}",
+        ]
+
+        if summary["git_dirty"] is True:
+            summary_lines.append("- 変更状態: 変更あり")
+        elif summary["git_dirty"] is False:
+            summary_lines.append("- 変更状態: クリーン")
+
+        if summary["changed_files"] > 0:
+            summary_lines.append(f"- 変更ファイル数: {summary['changed_files']}")
+
+        if summary["latest_commit"]:
+            summary_lines.append(f"- 最新コミット: {summary['latest_commit']}")
+
+        if summary["python_path"]:
+            summary_lines.append(f"- Python パス: {summary['python_path']}")
+
+        if summary["python_version"]:
+            summary_lines.append(f"- Python バージョン: {summary['python_version']}")
+        final_text = "\n\n".join(outputs)
+        if final_text:
+            final_text += "\n\n" + "\n".join(summary_lines)
+        else:
+            final_text = "\n".join(summary_lines)
 
         return {
-            "final_response": "\n\n".join(outputs) if outputs else "実行結果はありません",
+            "final_response": final_text,
             "messages": messages,
             "completed": True,
             "api_calls": 0,
         }
-
 
 #####
 
