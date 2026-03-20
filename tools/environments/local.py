@@ -253,8 +253,10 @@ def _clean_shell_noise(output: str) -> str:
         result += "\n"
     return result
 
-
-_SANE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_PYENV_SHIMS = os.path.expanduser("~/.pyenv/shims")
+_PYENV_ROOT = os.path.expanduser("~/.pyenv")
+_SANE_PATH = f"{_PYENV_SHIMS}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# _SANE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 def _make_run_env(env: dict) -> dict:
@@ -267,10 +269,27 @@ def _make_run_env(env: dict) -> dict:
             run_env[real_key] = v
         elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST:
             run_env[k] = v
+
     existing_path = run_env.get("PATH", "")
-    if "/usr/bin" not in existing_path.split(":"):
-        run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
+    path_parts = [p for p in existing_path.split(":") if p]
+
+    if _PYENV_SHIMS not in path_parts:
+        path_parts.insert(0, _PYENV_SHIMS)
+
+    for p in ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]:
+        if p not in path_parts:
+            path_parts.append(p)
+
+    run_env["PYENV_ROOT"] = _PYENV_ROOT
+    run_env["PATH"] = ":".join(path_parts)
     return run_env
+
+
+
+#    existing_path = run_env.get("PATH", "")
+#    if "/usr/bin" not in existing_path.split(":"):
+#        run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
+#    return run_env
 
 
 def _extract_fenced_output(raw: str) -> str:
@@ -324,7 +343,7 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
         user_shell = _find_bash()
         run_env = _make_run_env(self.env)
         return subprocess.Popen(
-            [user_shell, "-l"],
+            [user_shell],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -332,6 +351,7 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
             env=run_env,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
         )
+
 
     def _read_temp_files(self, *paths: str) -> list[str]:
         results = []
@@ -366,6 +386,14 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
         effective_timeout = timeout or self.timeout
         exec_command, sudo_stdin = self._prepare_command(command)
 
+        pyenv_prefix = (
+            'export PYENV_ROOT="$HOME/.pyenv"; '
+            'export PATH="$HOME/.pyenv/shims:$HOME/.pyenv/bin:$PATH"; '
+            'hash -r; '
+        )
+        exec_command = pyenv_prefix + exec_command
+
+
         if sudo_stdin is not None and stdin_data is not None:
             effective_stdin = sudo_stdin + stdin_data
         elif sudo_stdin is not None:
@@ -384,7 +412,7 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
         run_env = _make_run_env(self.env)
 
         proc = subprocess.Popen(
-            [user_shell, "-lic", fenced_cmd],
+            [user_shell, "-c", fenced_cmd],
             text=True,
             cwd=work_dir,
             env=run_env,

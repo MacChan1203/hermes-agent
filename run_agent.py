@@ -45,6 +45,8 @@ import fire
 from datetime import datetime
 from pathlib import Path
 
+import shlex
+
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.env_loader import load_hermes_dotenv
@@ -376,7 +378,7 @@ class AIAgent:
         acp_args: list[str] | None = None,
         command: str = None,
         args: list[str] | None = None,
-        model: str = "anthropic/claude-opus-4.6",  # OpenRouter format
+        model: str = "mistral:latest",
         max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
         tool_delay: float = 1.0,
         enabled_toolsets: List[str] = None,
@@ -415,7 +417,46 @@ class AIAgent:
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
-    ):
+
+
+        ):
+        self.model = model
+        self._cwd_state_file = os.path.join(os.getcwd(), ".hermes_cwd")
+        self._last_command_file = os.path.join(os.getcwd(), ".hermes_last_command")
+        self._last_command = ""
+        self._last_command_cwd_file = os.path.join(os.getcwd(), ".hermes_last_command_cwd")
+        self._last_command_cwd = ""
+
+        # --- CWD復元 ---
+        if os.path.isfile(self._cwd_state_file):
+            try:
+                with open(self._cwd_state_file, "r", encoding="utf-8") as f:
+                    saved_cwd = f.read().strip()
+                self._command_cwd = saved_cwd if saved_cwd and os.path.isdir(saved_cwd) else os.getcwd()
+            except Exception:
+                self._command_cwd = os.getcwd()
+        else:
+            self._command_cwd = os.getcwd()
+
+        # --- 前回コマンド復元 ---
+        if os.path.isfile(self._last_command_file):
+            try:
+                with open(self._last_command_file, "r", encoding="utf-8") as f:
+                    self._last_command = f.read().strip()
+            except Exception:
+                self._last_command = ""
+
+        # --- 前回コマンドのCWD復元 ---
+        if os.path.isfile(self._last_command_cwd_file):
+            try:
+                with open(self._last_command_cwd_file, "r", encoding="utf-8") as f:
+                    self._last_command_cwd = f.read().strip()
+            except Exception:
+                self._last_command_cwd = ""
+
+
+
+        self.max_iterations = max_iterations
         """
         Initialize the AI Agent.
 
@@ -424,7 +465,7 @@ class AIAgent:
             api_key (str): API key for authentication (optional, uses env var if not provided)
             provider (str): Provider identifier (optional; used for telemetry/routing hints)
             api_mode (str): API mode override: "chat_completions" or "codex_responses"
-            model (str): Model name to use (default: "anthropic/claude-opus-4.6")
+            model (str): Model name to use (default: "mistral:latest")
             max_iterations (int): Maximum number of tool calling iterations (default: 90)
             tool_delay (float): Delay between tool calls in seconds (default: 1.0)
             enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
@@ -461,8 +502,8 @@ class AIAgent:
         """
         _install_safe_stdio()
 
-        self.model = model
-        self.max_iterations = max_iterations
+
+
         # Shared iteration budget — parent creates, children inherit.
         # Consumed by every LLM turn across parent + all subagents.
         self.iteration_budget = iteration_budget or IterationBudget(max_iterations)
@@ -480,7 +521,7 @@ class AIAgent:
         # When no base_url is provided, the client defaults to OpenRouter, so reflect that here.
         self.base_url = base_url or OPENROUTER_BASE_URL
         provider_name = provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
-        self.provider = provider_name or "openrouter"
+        self.provider = provider_name or ("custom" if base_url and "127.0.0.1:11434" in base_url else "openrouter")
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
         if api_mode in {"chat_completions", "codex_responses", "anthropic_messages"}:
@@ -658,7 +699,7 @@ class AIAgent:
 
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
-            effective_key = api_key or resolve_anthropic_token() or ""
+            effective_key = api_key or os.getenv("OPENAI_API_KEY", "") or os.getenv("OPENROUTER_API_KEY", "") or ""
             self.api_key = effective_key
             self._anthropic_api_key = effective_key
             self._anthropic_base_url = base_url
@@ -711,7 +752,7 @@ class AIAgent:
                 else:
                     # Final fallback: try raw OpenRouter key
                     client_kwargs = {
-                        "api_key": os.getenv("OPENROUTER_API_KEY", ""),
+                        "api_key": os.getenv("OPENAI_API_KEY", "") or os.getenv("OPENROUTER_API_KEY", ""),
                         "base_url": OPENROUTER_BASE_URL,
                         "default_headers": {
                             "HTTP-Referer": "https://hermes-agent.nousresearch.com",
@@ -4709,6 +4750,7 @@ class AIAgent:
                 spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots')
                 spinner.start()
                 _spinner_result = None
+
                 try:
                     function_result = handle_function_call(
                         function_name, function_args, effective_task_id,
@@ -4717,12 +4759,14 @@ class AIAgent:
                         honcho_session_key=self._honcho_session_key,
                     )
                     _spinner_result = function_result
+
                 except Exception as tool_error:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 finally:
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_spinner_result)
+
                     spinner.stop(cute_msg)
             else:
                 try:
@@ -4739,6 +4783,11 @@ class AIAgent:
 
             result_preview = function_result if self.verbose_logging else (
                 function_result[:200] if len(function_result) > 200 else function_result
+            )
+
+            result_preview = function_result if self.verbose_logging else (
+                function_result[:200] if len(function_result) > 200 else function_result
+
             )
 
             # Log tool errors to the persistent error log so [error] tags
@@ -5119,6 +5168,301 @@ class AIAgent:
         
         if not self.quiet_mode:
             self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
+
+
+        import re
+        # コマンド抽出パターン
+        cmd_patterns = [
+            r"(python3\s+--version)",
+            r"(which\s+\S+)",
+            r"(pwd)",
+            r"(cd\s+\S+)",
+            r"(reset\s+cwd)",
+            r"(ls(?:\s+-[a-zA-Z]+)?(?:\s+\S+)*)",
+            r"(cat\s+\S+)",
+            r"(echo\s+.+)",
+            r"(rm\s+.+)",
+            r"(grep\s+.+)",
+            r"(find\s+\S+(?:\s+-[a-zA-Z]+\s+\S+)*(?:\s+\S+)*)",
+            r"(head(?:\s+-n\s+\d+|\s+-\d+)?\s+\S+)",
+            r"(tail(?:\s+-n\s+\d+|\s+-\d+)?\s+\S+)",
+            r"(wc(?:\s+-[a-zA-Z]+)?\s+\S+)",
+            r"(uname(?:\s+-[a-zA-Z]+)?)",
+            r"(date)",
+            r"(git\s+status)",
+            r"(git\s+diff(?:\s+--stat)?)",
+            r"(git\s+log\s+--oneline(?:\s+-n\s+\d+)?)",
+            r"(git\s+branch)",
+            r"^(repeat\s+last\s+command)$",
+            r"^(run\s+last\s+command)$",
+            r"^(last\s+command)$",
+            r"^(show\s+last\s+command)$",
+        ]
+
+        # 自然文をコマンドに寄せる簡易正規化
+        normalized_message = user_message.strip()
+
+        natural_command_map = [
+            (["今どこ", "現在地", "どこにいる", "pwd"], "pwd"),
+            (["フォルダ一覧", "ファイル一覧", "一覧見せて", "ls"], "ls"),
+            (["pythonのバージョン", "python バージョン", "python版", "pythonの版", "python3のバージョン"], "python3 --version"),
+            (["which python3", "python3の場所", "python3 はどこ"], "which python3"),
+            (["gitの状態", "git status"], "git status"),
+            (["gitの差分", "差分見せて", "git diff"], "git diff"),
+            (["gitの履歴", "履歴見せて", "git log"], "git log --oneline -n 5"),
+            (["gitのブランチ", "ブランチ見せて", "git branch"], "git branch"),
+            (["親フォルダに戻って", "一つ上に戻って", "ひとつ上に戻って"], "cd .."),
+            (["ホームに戻って", "最初に戻って"], "reset cwd"),
+        ]
+
+        # 再実行系は最優先
+        if "前回のコマンドもう一回" in user_message or "もう一度実行" in user_message:
+            normalized_message = "repeat last command"
+        elif "前回のコマンド" in user_message or "last command" in user_message:
+            normalized_message = "last command"
+        else:
+            lowered_message = normalized_message.lower()
+            for keywords, mapped_cmd in natural_command_map:
+                if any(k.lower() in lowered_message for k in keywords):
+                    normalized_message = mapped_cmd
+                    break
+
+        extracted_cmd = None
+
+        # repeat / last は cmd_patterns に頼らず直で確定
+        if normalized_message == "repeat last command":
+            extracted_cmd = "repeat last command"
+        elif normalized_message == "last command":
+            extracted_cmd = "last command"
+        else:
+            for pattern in cmd_patterns:
+                match = re.search(pattern, normalized_message)
+                if match:
+                    extracted_cmd = match.group(1)
+                    extracted_cmd = re.sub(
+                        r"\s*(を実行して|を表示して|を実行|を表示|して|して下さい|してください)$",
+                        "",
+                        extracted_cmd,
+                    ).strip()
+                    break
+
+
+        lowered_message = normalized_message.lower()
+        for keywords, mapped_cmd in natural_command_map:
+            if any(k.lower() in lowered_message for k in keywords):
+                normalized_message = mapped_cmd
+                break
+
+
+        # 🔴 ここに入れる（危険コマンドブロック）
+        dangerous_patterns = [
+            r"^\s*rm\s+-rf\s+/$",
+            r"^\s*rm\s+-rf\s+~$",
+            r"^\s*rm\s+-rf\s+\*$",
+            r"^\s*shutdown\b",
+            r"^\s*reboot\b",
+            r":\(\)\{.*\}",
+            r"^\s*mkfs\b",
+            r"^\s*dd\s+if=",
+        ]
+
+
+        if extracted_cmd:
+            for dp in dangerous_patterns:
+                if re.search(dp, extracted_cmd):
+                    return {
+                        "final_response": "⚠️ 危険なコマンドのため実行を拒否しました",
+                        "messages": messages,
+                        "completed": True,
+                        "api_calls": 0,
+                    }
+        # 🔵 CWDリセットコマンド
+        if extracted_cmd:
+            reset_commands = ["reset cwd", "cd ~", "cd /"]
+
+            if extracted_cmd.strip() in reset_commands:
+                base_dir = os.path.expanduser("~")  # ホームに戻す
+
+                self._command_cwd = base_dir
+
+                try:
+                    with open(self._cwd_state_file, "w", encoding="utf-8") as f:
+                        f.write(self._command_cwd)
+                except Exception:
+                    pass
+
+                return {
+                    "final_response": f"🔄 CWDをリセットしました: {self._command_cwd}",
+                    "messages": messages,
+                    "completed": True,
+                    "api_calls": 0,
+                }
+
+
+        # 前回コマンド再実行
+        if extracted_cmd in ["repeat last command", "run last command"]:
+            if self._last_command:
+                replay_cmd = self._last_command
+                replay_cwd = self._last_command_cwd or self._command_cwd
+
+                function_result = handle_function_call(
+                    "terminal",
+                    {"command": f"cd {shlex.quote(replay_cwd)} && {replay_cmd}"},
+                    task_id,
+                    enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                    honcho_manager=self._honcho,
+                    honcho_session_key=self._honcho_session_key,
+                )
+
+                parsed = json.loads(function_result) if isinstance(function_result, str) else function_result
+                raw_output = parsed.get("output", "") if isinstance(parsed, dict) else ""
+
+                display_output = raw_output.strip()
+
+                if display_output and replay_cmd != "pwd":
+                    display_output = f"[cwd: {replay_cwd}]\n{display_output}"
+
+                return {
+                    "final_response": display_output,
+                    "messages": messages,
+                    "completed": True,
+                    "api_calls": 0,
+                }
+            else:
+                return {
+                    "final_response": "前回のコマンドはまだありません",
+                    "messages": messages,
+                    "completed": True,
+                    "api_calls": 0,
+                }
+
+
+        # cd は状態だけ更新
+        if extracted_cmd and extracted_cmd.startswith("cd "):
+            target_dir = extracted_cmd[3:].strip()
+
+            if not os.path.isabs(target_dir):
+                target_dir = os.path.join(self._command_cwd, target_dir)
+
+            target_dir = os.path.abspath(os.path.expanduser(target_dir))
+
+            if os.path.isdir(target_dir):
+                self._command_cwd = target_dir
+                try:
+                    with open(self._cwd_state_file, "w", encoding="utf-8") as f:
+                        f.write(self._command_cwd)
+                except Exception:
+                    pass
+
+                return {
+                    "final_response": self._command_cwd,
+                    "messages": messages,
+                    "completed": True,
+                    "api_calls": 0,
+                }
+
+            else:
+                return {
+                    "final_response": f"cd: no such directory: {target_dir}",
+                    "messages": messages,
+                    "completed": True,
+                    "api_calls": 0,
+                }
+
+
+        # 「実行」「表示」が入っていれば強制実行
+        if extracted_cmd and (
+            "実行" in user_message
+            or "表示" in user_message
+            or normalized_message == extracted_cmd
+        ):
+
+
+            self._last_command = extracted_cmd
+            self._last_command_cwd = self._command_cwd
+            try:
+                with open(self._last_command_file, "w", encoding="utf-8") as f:
+                    f.write(self._last_command)
+                with open(self._last_command_cwd_file, "w", encoding="utf-8") as f:
+                    f.write(self._last_command_cwd)
+            except Exception:
+                pass
+
+            function_result = handle_function_call(
+                "terminal",
+                {"command": f"cd {shlex.quote(self._command_cwd)} && {extracted_cmd}"},
+                task_id,
+                enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                honcho_manager=self._honcho,
+                honcho_session_key=self._honcho_session_key,
+            )
+            parsed = json.loads(function_result) if isinstance(function_result, str) else function_result
+            raw_output = parsed.get("output", "") if isinstance(parsed, dict) else ""
+
+            display_output = raw_output.strip()
+
+            # Gitリポジトリ外なら分かりやすく言い換える
+            git_read_cmds = (
+                "git status",
+                "git diff",
+                "git log",
+                "git branch",
+            )
+
+            if extracted_cmd.startswith(git_read_cmds):
+                git_errors = (
+                    "not a git repository",
+                    "Not a git repository",
+                )
+                if any(err in display_output for err in git_errors):
+                    display_output = (
+                        f"[cwd: {self._command_cwd}]\n"
+                        "⚠️ ここは Git リポジトリではありません\n"
+                        "💡 例: cd hermes-agent を実行してから試してください"
+                    )
+                    return {
+                        "final_response": display_output,
+                        "messages": messages,
+                        "completed": True,
+                        "api_calls": 0,
+                    }
+
+
+            # pwd のときだけ CWD 表示を付けない
+            if display_output and extracted_cmd != "pwd":
+                display_output = f"[cwd: {self._command_cwd}]\n{display_output}"
+
+            return {
+                "final_response": display_output,
+                "messages": messages,
+                "completed": True,
+                "api_calls": 0,
+            }
+
+
+
+        # terminal直実行ショートカット
+        if "python3 --version" in user_message and "実行" in user_message:
+            function_result = handle_function_call(
+                "terminal",
+                {"command": "python3 --version"},
+                task_id,
+                enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                honcho_manager=self._honcho,
+                honcho_session_key=self._honcho_session_key,
+            )
+            parsed = json.loads(function_result) if isinstance(function_result, str) else function_result
+            raw_output = parsed.get("output", "") if isinstance(parsed, dict) else ""
+            return {
+                "final_response": raw_output.strip(),
+                "messages": messages,
+                "completed": True,
+                "api_calls": 0,
+            }
+
+        # ── System prompt (cached per session for prefix caching) ──
+
+
         
         # ── System prompt (cached per session for prefix caching) ──
         # Built once on first call, reused for all subsequent calls.
@@ -6699,9 +7043,9 @@ class AIAgent:
 
 def main(
     query: str = None,
-    model: str = "anthropic/claude-opus-4.6",
+    model: str = "mistral:latest",
     api_key: str = None,
-    base_url: str = "https://openrouter.ai/api/v1",
+    base_url: str = "http://127.0.0.1:11434/v1",
     max_turns: int = 10,
     enabled_toolsets: str = None,
     disabled_toolsets: str = None,
@@ -6838,10 +7182,12 @@ def main(
     
     # Initialize agent with provided parameters
     try:
+
         agent = AIAgent(
             base_url=base_url,
             model=model,
-            api_key=api_key,
+            api_key=api_key or os.getenv("OPENAI_API_KEY", "") or os.getenv("OPENROUTER_API_KEY", ""),
+            provider="custom",
             max_iterations=max_turns,
             enabled_toolsets=enabled_toolsets_list,
             disabled_toolsets=disabled_toolsets_list,
@@ -6849,6 +7195,7 @@ def main(
             verbose_logging=verbose,
             log_prefix_chars=log_prefix_chars
         )
+
     except RuntimeError as e:
         print(f"❌ Failed to initialize agent: {e}")
         return
