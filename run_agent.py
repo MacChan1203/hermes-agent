@@ -5142,30 +5142,31 @@ class AIAgent:
 
             # Git系コマンドの前に、候補ディレクトリを自動探索して移動
             if cmd.startswith("git "):
-                candidate_entries = self._guess_project_candidates(user_message)
+                candidate_entries = self._score_project_candidates(user_message)
+
                 if not os.path.isdir(os.path.join(working_cwd, ".git")):
                     found_candidate = None
                     found_name = None
-                    found_reason = None
+                    found_reasons = None
+                    found_score = None
 
-                    # 直前の ls 結果から候補を探す
-                    for name, reason in candidate_entries:
+                    for name, score, reasons in candidate_entries:
                         if name in last_ls_output:
                             candidate_dir = os.path.join(working_cwd, name)
                             if os.path.isdir(candidate_dir) and os.path.isdir(os.path.join(candidate_dir, ".git")):
                                 found_candidate = candidate_dir
                                 found_name = name
-                                found_reason = reason
+                                found_reasons = reasons
+                                found_score = score
                                 break
 
-                    # 候補が見つかったら移動
                     if found_candidate:
                         working_cwd = found_candidate
+                        reason_text = ", ".join(found_reasons)
                         outputs.append(
-                            f'🤖 自律判断: {found_reason} "{found_name}" を優先候補として選択し、{working_cwd} に移動して続行します'
+                            f'🤖 自律判断: "{found_name}" が最有力候補でした（score={found_score} / 理由: {reason_text}）。{working_cwd} に移動して続行します'
                         )
                         summary["cwd"] = working_cwd
-
             function_result = handle_function_call(
                 "terminal",
                 {"command": f"cd {shlex.quote(working_cwd)} && {run_cmd}"},
@@ -5268,6 +5269,50 @@ class AIAgent:
             "completed": True,
             "api_calls": 0,
         }
+
+    def _score_project_candidates(self, user_message: str) -> list[tuple[str, int, list[str]]]:
+        text = user_message.strip().lower()
+        home_dir = os.path.expanduser("~")
+
+        base_candidates = [
+            "hermes-agent",
+            "everything-claude-code",
+        ]
+
+        scored: list[tuple[str, int, list[str]]] = []
+
+        for name in base_candidates:
+            candidate_dir = os.path.join(home_dir, name)
+            if not os.path.isdir(candidate_dir):
+                continue
+
+            score = 0
+            reasons: list[str] = []
+
+            if "claude" in text and "claude" in name:
+                score += 10
+                reasons.append('依頼文に "claude" が含まれる')
+
+            if "hermes" in text and "hermes" in name:
+                score += 10
+                reasons.append('依頼文に "hermes" が含まれる')
+
+            if "プロジェクト" in text or "リポジトリ" in text:
+                if name == "hermes-agent":
+                    score += 2
+                    reasons.append("既定の作業対象として優先")
+
+            score += 1
+            reasons.append("既存ディレクトリである")
+
+            if os.path.isdir(os.path.join(candidate_dir, ".git")):
+                score += 3
+                reasons.append("Git リポジトリである")
+
+            scored.append((name, score, reasons))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
 
 #####
 
