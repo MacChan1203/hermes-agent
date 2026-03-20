@@ -9,4 +9,5 @@ __pycache__/
 
 # Environment
 .env
+.hermes_last_command_cwd
 

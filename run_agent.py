@@ -5038,6 +5038,69 @@ class AIAgent:
 
         return final_response
 
+
+##### 自律モードの関数
+    def _make_autonomous_plan(self, user_message: str) -> list[str] | None:
+        text = user_message.strip().lower()
+
+        if "プロジェクトの状態" in user_message:
+            return ["pwd", "ls", "git status", "git diff --stat"]
+
+        if "python環境" in user_message or "pythonの環境" in user_message:
+            return ["which python3", "python3 --version", "pwd"]
+
+        if "gitリポジトリ" in user_message and "履歴" in user_message:
+            return ["git status", "git log --oneline -n 5"]
+
+        if "最近のgitの状況" in user_message:
+            return ["git status", "git diff --stat", "git log --oneline -n 5"]
+
+        return None
+
+    def _run_autonomous_plan(self, plan: list[str], task_id: str, messages: list[dict]) -> dict:
+        max_steps = 3
+        outputs = []
+
+        for cmd in plan[:max_steps]:
+            function_result = handle_function_call(
+                "terminal",
+                {"command": f"cd {shlex.quote(self._command_cwd)} && {cmd}"},
+                task_id,
+                enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                honcho_manager=self._honcho,
+                honcho_session_key=self._honcho_session_key,
+            )
+
+            parsed = json.loads(function_result) if isinstance(function_result, str) else function_result
+            raw_output = parsed.get("output", "") if isinstance(parsed, dict) else ""
+            output = raw_output.strip()
+
+            # Gitリポジトリ外なら、その時点で停止
+            if "not a git repository" in output or "Not a git repository" in output:
+                outputs.append(
+                    f"[cwd: {self._command_cwd}]\n⚠️ ここは Git リポジトリではありません\n💡 例: cd hermes-agent を実行してから試してください"
+                )
+                break
+
+            # 出力があるものだけ保存
+            if output:
+                if cmd != "pwd":
+                    outputs.append(f"[cwd: {self._command_cwd}]\n$ {cmd}\n{output}")
+                else:
+                    outputs.append(f"$ {cmd}\n{output}")
+
+        return {
+            "final_response": "\n\n".join(outputs) if outputs else "実行結果はありません",
+            "messages": messages,
+            "completed": True,
+            "api_calls": 0,
+        }
+
+
+#####
+
+
+
     def run_conversation(
         self,
         user_message: str,
@@ -5601,6 +5664,14 @@ class AIAgent:
                 "completed": True,
                 "api_calls": 0,
             }
+
+#####　自律モード
+        autonomous_plan = self._make_autonomous_plan(user_message)
+        if autonomous_plan:
+            return self._run_autonomous_plan(autonomous_plan, task_id, messages)
+#####
+
+
 
         # ── System prompt (cached per session for prefix caching) ──
 
