@@ -5041,28 +5041,36 @@ class AIAgent:
 
 
 ##### 自律モードの関数
-    def _guess_project_candidates(self, user_message: str) -> list[str]:
+    def _guess_project_candidates(self, user_message: str) -> list[tuple[str, str]]:
         text = user_message.strip().lower()
-        raw_candidates = []
+        raw_candidates: list[tuple[str, str]] = []
 
         if "claude" in text:
-            raw_candidates.append("everything-claude-code")
+            raw_candidates.append(
+                ("everything-claude-code", '依頼文に "claude" が含まれていたため')
+            )
         if "hermes" in text:
-            raw_candidates.append("hermes-agent")
+            raw_candidates.append(
+                ("hermes-agent", '依頼文に "hermes" が含まれていたため')
+            )
 
-        for name in ["hermes-agent", "everything-claude-code"]:
-            if name not in raw_candidates:
-                raw_candidates.append(name)
+        fallback_candidates = [
+            ("everything-claude-code", "既定の候補として"),
+            ("hermes-agent", "既定の候補として"),
+        ]
 
-        existing = []
+        existing_names = {name for name, _ in raw_candidates}
+        for name, reason in fallback_candidates:
+            if name not in existing_names:
+                raw_candidates.append((name, reason))
+
+        existing: list[tuple[str, str]] = []
         home_dir = os.path.expanduser("~")
-        for name in raw_candidates:
+        for name, reason in raw_candidates:
             if os.path.isdir(os.path.join(home_dir, name)):
-                existing.append(name)
+                existing.append((name, reason))
 
         return existing
-
-
 
     def _make_autonomous_plan(self, user_message: str) -> list[str] | None:
         text = user_message.strip().lower()
@@ -5134,24 +5142,29 @@ class AIAgent:
 
             # Git系コマンドの前に、候補ディレクトリを自動探索して移動
             if cmd.startswith("git "):
-                candidate_names = self._guess_project_candidates(user_message)
+                candidate_entries = self._guess_project_candidates(user_message)
                 if not os.path.isdir(os.path.join(working_cwd, ".git")):
                     found_candidate = None
+                    found_name = None
+                    found_reason = None
 
                     # 直前の ls 結果から候補を探す
-                    for name in candidate_names:
+                    for name, reason in candidate_entries:
                         if name in last_ls_output:
                             candidate_dir = os.path.join(working_cwd, name)
                             if os.path.isdir(candidate_dir) and os.path.isdir(os.path.join(candidate_dir, ".git")):
                                 found_candidate = candidate_dir
+                                found_name = name
+                                found_reason = reason
                                 break
 
                     # 候補が見つかったら移動
                     if found_candidate:
                         working_cwd = found_candidate
-                        outputs.append(f"🤖 自律判断: {working_cwd} に移動して続行します")
+                        outputs.append(
+                            f'🤖 自律判断: {found_reason} "{found_name}" を優先候補として選択し、{working_cwd} に移動して続行します'
+                        )
                         summary["cwd"] = working_cwd
-
 
             function_result = handle_function_call(
                 "terminal",
