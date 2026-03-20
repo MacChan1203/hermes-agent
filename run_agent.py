@@ -420,6 +420,7 @@ class AIAgent:
 
 
         ):
+
         self.model = model
         self._cwd_state_file = os.path.join(os.getcwd(), ".hermes_cwd")
         self._last_command_file = os.path.join(os.getcwd(), ".hermes_last_command")
@@ -5040,6 +5041,29 @@ class AIAgent:
 
 
 ##### 自律モードの関数
+    def _guess_project_candidates(self, user_message: str) -> list[str]:
+        text = user_message.strip().lower()
+        raw_candidates = []
+
+        if "claude" in text:
+            raw_candidates.append("everything-claude-code")
+        if "hermes" in text:
+            raw_candidates.append("hermes-agent")
+
+        for name in ["hermes-agent", "everything-claude-code"]:
+            if name not in raw_candidates:
+                raw_candidates.append(name)
+
+        existing = []
+        home_dir = os.path.expanduser("~")
+        for name in raw_candidates:
+            if os.path.isdir(os.path.join(home_dir, name)):
+                existing.append(name)
+
+        return existing
+
+
+
     def _make_autonomous_plan(self, user_message: str) -> list[str] | None:
         text = user_message.strip().lower()
 
@@ -5076,10 +5100,19 @@ class AIAgent:
         if "このリポジトリをざっと見て" in text or "リポジトリをざっと見て" in text:
             return ["pwd", "ls", "git status", "git log --oneline -n 3"]
 
+        if "hermesの状態" in text or "hermes agentの状態" in text:
+            return ["pwd", "ls", "git status", "git log --oneline -n 3"]
+
+        if "claudeの状態" in text or "claude codeの状態" in text:
+            return ["pwd", "ls", "git status", "git log --oneline -n 3"]
+
+        if "このリポジトリを見て" in text or "リポジトリを見て" in text:
+            return ["pwd", "ls", "git status", "git diff --stat", "git log --oneline -n 3"]
+
         return None
 
 
-    def _run_autonomous_plan(self, plan: list[str], task_id: str, messages: list[dict]) -> dict:
+    def _run_autonomous_plan(self, plan: list[str], task_id: str, messages: list[dict], user_message: str) -> dict:
         max_steps = 5
         outputs = []
 
@@ -5101,12 +5134,7 @@ class AIAgent:
 
             # Git系コマンドの前に、候補ディレクトリを自動探索して移動
             if cmd.startswith("git "):
-                candidate_names = [
-                    "hermes-agent",
-                    "hn_ai",
-                    "everything-claude-code",
-                ]
-
+                candidate_names = self._guess_project_candidates(user_message)
                 if not os.path.isdir(os.path.join(working_cwd, ".git")):
                     found_candidate = None
 
@@ -5799,7 +5827,7 @@ class AIAgent:
 #####　自律モード
         autonomous_plan = self._make_autonomous_plan(user_message)
         if autonomous_plan:
-            return self._run_autonomous_plan(autonomous_plan, task_id, messages)
+            return self._run_autonomous_plan(autonomous_plan, task_id, messages, user_message)
 #####
 
 
