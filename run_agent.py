@@ -5181,7 +5181,6 @@ class AIAgent:
             r"(ls(?:\s+-[a-zA-Z]+)?(?:\s+\S+)*)",
             r"(cat\s+\S+)",
             r"(echo\s+.+)",
-            r"(rm\s+.+)",
             r"(grep\s+.+)",
             r"(find\s+\S+(?:\s+-[a-zA-Z]+\s+\S+)*(?:\s+\S+)*)",
             r"(head(?:\s+-n\s+\d+|\s+-\d+)?\s+\S+)",
@@ -5201,6 +5200,111 @@ class AIAgent:
 
         # 自然文をコマンドに寄せる簡易正規化
         normalized_message = user_message.strip()
+
+        blocked_delete_keywords = [
+            "rm ",
+            "rm　",
+            "削除",
+            "消して",
+            "消す",
+        ]
+
+        blocked_git_write_keywords = [
+            "git add",
+            "git commit",
+            "git push",
+            "git merge",
+            "git rebase",
+        ]
+
+        blocked_file_write_keywords = [
+            "mv ",
+            "cp ",
+            "chmod ",
+            "chown ",
+            "sed -i",
+        ]
+
+        blocked_network_exec_keywords = [
+            "curl ",
+            "wget ",
+            "bash ",
+            "sh ",
+        ]
+
+        lowered_user_message = user_message.lower()
+
+        if any(keyword in lowered_user_message for keyword in blocked_delete_keywords):
+            return {
+                "final_response": (
+                    "⚠️ 安全モードのため、削除系の操作は実行できません\n"
+                    "💡 代わりに `ls` や `find` で対象を確認してください"
+                ),
+                "messages": messages,
+                "completed": True,
+                "api_calls": 0,
+            }
+
+        if any(keyword in lowered_user_message for keyword in blocked_git_write_keywords):
+            return {
+                "final_response": (
+                    "⚠️ 安全モードのため、Gitの書き込み操作は実行できません\n"
+                    "💡 `git status`、`git diff`、`git log --oneline -n 5` は利用できます"
+                ),
+                "messages": messages,
+                "completed": True,
+                "api_calls": 0,
+            }
+
+        if any(keyword in lowered_user_message for keyword in blocked_file_write_keywords):
+            return {
+                "final_response": (
+                    "⚠️ 安全モードのため、ファイル変更系の操作は実行できません"
+                ),
+                "messages": messages,
+                "completed": True,
+                "api_calls": 0,
+            }
+
+        if any(keyword in lowered_user_message for keyword in blocked_network_exec_keywords):
+            return {
+                "final_response": (
+                    "⚠️ 安全モードのため、外部取得・スクリプト実行系の操作は実行できません"
+                ),
+                "messages": messages,
+                "completed": True,
+                "api_calls": 0,
+            }
+
+        # 危険・書き込み系の意図は早期ブロック
+        blocked_keywords = [
+            "rm ",
+            "rm　",
+            "削除",
+            "消して",
+            "消す",
+            "git add",
+            "git commit",
+            "git push",
+            "mv ",
+            "cp ",
+            "chmod ",
+            "chown ",
+            "sed -i",
+            "curl ",
+            "wget ",
+            "bash ",
+            "sh ",
+        ]
+
+        lowered_user_message = user_message.lower()
+        if any(keyword in lowered_user_message for keyword in blocked_keywords):
+            return {
+                "final_response": "⚠️ 安全モードのため、この操作は実行できません",
+                "messages": messages,
+                "completed": True,
+                "api_calls": 0,
+            }
 
         natural_command_map = [
             (["今どこ", "現在地", "どこにいる", "pwd"], "pwd"),
@@ -5293,6 +5397,44 @@ class AIAgent:
 
                 return {
                     "final_response": f"🔄 CWDをリセットしました: {self._command_cwd}",
+                    "messages": messages,
+                    "completed": True,
+                    "api_calls": 0,
+                }
+
+        # 安全モード: 許可されたコマンドだけ実行
+        safe_prefixes = [
+            "pwd",
+            "ls",
+            "which ",
+            "python3 --version",
+            "grep ",
+            "find ",
+            "head ",
+            "tail ",
+            "wc ",
+            "uname",
+            "date",
+            "cat ",
+            "cd ",
+            "reset cwd",
+            "git status",
+            "git diff",
+            "git log",
+            "git branch",
+            "last command",
+            "show last command",
+            "repeat last command",
+            "run last command",
+        ]
+
+        if extracted_cmd:
+            if not any(
+                extracted_cmd == prefix or extracted_cmd.startswith(prefix)
+                for prefix in safe_prefixes
+            ):
+                return {
+                    "final_response": f"⚠️ 安全モードのため、このコマンドは実行できません: {extracted_cmd}",
                     "messages": messages,
                     "completed": True,
                     "api_calls": 0,
