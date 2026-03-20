@@ -5163,10 +5163,25 @@ class AIAgent:
                     if found_candidate:
                         working_cwd = found_candidate
                         reason_text = ", ".join(found_reasons)
+
+                        visible_candidates = []
+                        for name, score, reasons in candidate_entries:
+                            if name in last_ls_output:
+                                visible_candidates.append((name, score, reasons))
+
+                        runner_up_text = ""
+                        if len(visible_candidates) >= 2:
+                            second_name, second_score, _second_reasons = visible_candidates[1]
+                            if second_name != found_name:
+                                runner_up_text = f' 次点: "{second_name}"（score={second_score}）。'
+
                         outputs.append(
-                            f'🤖 自律判断: "{found_name}" が最有力候補でした（score={found_score} / 理由: {reason_text}）。{working_cwd} に移動して続行します'
+                            f'🤖 自律判断: "{found_name}" が最有力候補でした（score={found_score}）。'
+                            f'{runner_up_text} 理由: {reason_text}。{working_cwd} に移動して続行します'
                         )
                         summary["cwd"] = working_cwd
+
+
             function_result = handle_function_call(
                 "terminal",
                 {"command": f"cd {shlex.quote(working_cwd)} && {run_cmd}"},
